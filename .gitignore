@@ -2,3 +2,7 @@ hackathonDetails/
 .agents/
 AGENTS.md
 PROGRESS.md
+__pycache__/
+*.pyc
+*.pyo
+.env

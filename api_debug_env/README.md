@@ -1,255 +1,165 @@
----
-title: Api Debug Env Environment Server
-emoji: 🎳
-colorFrom: blue
-colorTo: green
-sdk: docker
-pinned: false
-app_port: 8000
-base_path: /web
-tags:
-  - openenv
----
+# API Integration Debugging Environment
 
-# Api Debug Env Environment
+An OpenEnv environment where AI agents diagnose and fix broken API integrations — a real-world task that developers face daily.
 
-A simple test environment that echoes back messages. Perfect for testing the env APIs as well as demonstrating environment usage patterns.
+## Overview
 
-## Quick Start
+Agents interact with a simulated multi-service API ecosystem that has various misconfigurations. Through a `step()/reset()/state()` API, the agent must:
 
-The simplest way to use the Api Debug Env environment is through the `ApiDebugEnv` class:
+1. **Inspect error logs** to identify failure patterns
+2. **Inspect service configurations** to find misconfigurations
+3. **Test endpoints** to observe current behavior
+4. **Submit fixes** with corrected configuration payloads
+
+## Action Space
 
 ```python
-from api_debug_env import ApiDebugAction, ApiDebugEnv
-
-try:
-    # Create environment from Docker image
-    api_debug_envenv = ApiDebugEnv.from_docker_image("api_debug_env-env:latest")
-
-    # Reset
-    result = api_debug_envenv.reset()
-    print(f"Reset: {result.observation.echoed_message}")
-
-    # Send multiple messages
-    messages = ["Hello, World!", "Testing echo", "Final message"]
-
-    for msg in messages:
-        result = api_debug_envenv.step(ApiDebugAction(message=msg))
-        print(f"Sent: '{msg}'")
-        print(f"  → Echoed: '{result.observation.echoed_message}'")
-        print(f"  → Length: {result.observation.message_length}")
-        print(f"  → Reward: {result.reward}")
-
-finally:
-    # Always clean up
-    api_debug_envenv.close()
+class ApiDebugAction(Action):
+    action_type: str   # "inspect_logs" | "inspect_config" | "inspect_endpoint" | "submit_fix"
+    target: str        # Service name (e.g. "payment_client", "webhook_sender")
+    fix_payload: dict  # Required when action_type="submit_fix"
 ```
 
-That's it! The `ApiDebugEnv.from_docker_image()` method handles:
-- Starting the Docker container
-- Waiting for the server to be ready
-- Connecting to the environment
-- Container cleanup when you call `close()`
+| Action | Description | Reward |
+|--------|-------------|--------|
+| `inspect_logs` | Read error logs for a service | +0.05 (relevant) / +0.15 (finds new issue) |
+| `inspect_config` | View current config of a service | +0.02 to +0.05 |
+| `inspect_endpoint` | Test-call an endpoint | +0.02 to +0.05 |
+| `submit_fix` | Submit a configuration fix | +0.25 (correct) / -0.1 (wrong) |
 
-## Building the Docker Image
+## Observation Space
 
-Before using the environment, you need to build the Docker image:
-
-```bash
-# From project root
-docker build -t api_debug_env-env:latest -f server/Dockerfile .
+```python
+class ApiDebugObservation(Observation):
+    task_id: str              # "easy", "medium", or "hard"
+    task_description: str     # Human-readable task description
+    logs: List[str]           # Error log lines from inspected service
+    config_snapshot: dict     # Configuration of inspected service
+    api_response: dict        # Response from endpoint test
+    hints: List[str]          # Progressive hints based on step count
+    remaining_steps: int      # Steps before episode timeout
+    issues_found: int         # Issues identified so far
+    issues_fixed: int         # Issues correctly fixed so far
+    issues_total: int         # Total issues in scenario
+    action_result: str        # Feedback on last action
+    available_targets: List   # Valid service names
 ```
 
-## Deploying to Hugging Face Spaces
+## Tasks
 
-You can easily deploy your OpenEnv environment to Hugging Face Spaces using the `openenv push` command:
+### Task 1: Easy — Payment API Auth Fix
+- **Issues**: 2 (missing `Authorization` header, wrong `Content-Type`)
+- **Max Steps**: 15
+- **Services**: `payment_client`, `payment_gateway`
+- **Scenario**: Payment gateway rejects requests with 401/415 errors
 
-```bash
-# From the environment directory (where openenv.yaml is located)
-openenv push
+### Task 2: Medium — Webhook Chain Debugging
+- **Issues**: 3 (rate limit too high, insufficient retries, empty webhook signature)
+- **Max Steps**: 25
+- **Services**: `webhook_sender`, `webhook_receiver`, `notification_service`
+- **Scenario**: Events are dropped across a webhook notification pipeline
 
-# Or specify options
-openenv push --namespace my-org --private
+### Task 3: Hard — Microservice Cascade Failure
+- **Issues**: 5 (wrong endpoint URL, timeout too short, sync mode race condition, expired auth token, missing token refresh)
+- **Max Steps**: 40
+- **Services**: `order_service`, `inventory_service`, `shipping_service`, `api_gateway`, `auth_service`
+- **Scenario**: E-commerce order processing pipeline fails with cascading 500s
+
+## Reward Function
+
+- **Partial progress**: Every useful inspection earns reward (+0.05 to +0.15)
+- **Fix rewards**: +0.25 per correctly fixed issue
+- **Completion bonus**: +0.2 when all issues are resolved
+- **Penalties**: -0.1 for wrong fixes, -0.05 for invalid actions
+
+## Grading
+
+```
+Score = (issues_fixed / issues_total) × efficiency_bonus
+efficiency_bonus = 1.0 + (remaining_steps / max_steps × 0.3)
 ```
 
-The `openenv push` command will:
-1. Validate that the directory is an OpenEnv environment (checks for `openenv.yaml`)
-2. Prepare a custom build for Hugging Face Docker space (enables web interface)
-3. Upload to Hugging Face (ensuring you're logged in)
+Faster fixes earn up to 30% bonus. Score capped at 1.0.
+
+## Baseline Scores
+
+| Task | Score | Reward | Issues Found | Issues Fixed | Steps |
+|------|-------|--------|-------------|-------------|-------|
+| Easy | 0.0000 | 0.34 | 2/2 | 0/2 | 6 |
+| Medium | 0.0000 | 0.53 | 3/3 | 0/3 | 9 |
+| Hard | 0.0000 | 0.87 | 5/5 | 0/5 | 15 |
+
+> The rule-based baseline only explores (inspects) without submitting fixes, establishing a floor. An LLM agent that also fixes issues will score significantly higher.
+
+## Setup & Usage
 
 ### Prerequisites
+- Python 3.10+
+- Docker (for containerized deployment)
 
-- Authenticate with Hugging Face: The command will prompt for login if not already authenticated
-
-### Options
-
-- `--directory`, `-d`: Directory containing the OpenEnv environment (defaults to current directory)
-- `--repo-id`, `-r`: Repository ID in format 'username/repo-name' (defaults to 'username/env-name' from openenv.yaml)
-- `--base-image`, `-b`: Base Docker image to use (overrides Dockerfile FROM)
-- `--private`: Deploy the space as private (default: public)
-
-### Examples
+### Local Development
 
 ```bash
-# Push to your personal namespace (defaults to username/env-name from openenv.yaml)
-openenv push
+cd api_debug_env
 
-# Push to a specific repository
-openenv push --repo-id my-org/my-env
+# Install dependencies
+uv sync
 
-# Push with a custom base image
-openenv push --base-image ghcr.io/meta-pytorch/openenv-base:latest
-
-# Push as a private space
-openenv push --private
-
-# Combine options
-openenv push --repo-id my-org/my-env --base-image custom-base:latest --private
+# Run server
+uv run server
+# or
+uvicorn server.app:app --reload --host 0.0.0.0 --port 8000
 ```
 
-After deployment, your space will be available at:
-`https://huggingface.co/spaces/<repo-id>`
-
-The deployed space includes:
-- **Web Interface** at `/web` - Interactive UI for exploring the environment
-- **API Documentation** at `/docs` - Full OpenAPI/Swagger interface
-- **Health Check** at `/health` - Container health monitoring
-- **WebSocket** at `/ws` - Persistent session endpoint for low-latency interactions
-
-## Environment Details
-
-### Action
-**ApiDebugAction**: Contains a single field
-- `message` (str) - The message to echo back
-
-### Observation
-**ApiDebugObservation**: Contains the echo response and metadata
-- `echoed_message` (str) - The message echoed back
-- `message_length` (int) - Length of the message
-- `reward` (float) - Reward based on message length (length × 0.1)
-- `done` (bool) - Always False for echo environment
-- `metadata` (dict) - Additional info like step count
-
-### Reward
-The reward is calculated as: `message_length × 0.1`
-- "Hi" → reward: 0.2
-- "Hello, World!" → reward: 1.3
-- Empty message → reward: 0.0
-
-## Advanced Usage
-
-### Connecting to an Existing Server
-
-If you already have a Api Debug Env environment server running, you can connect directly:
-
-```python
-from api_debug_env import ApiDebugEnv
-
-# Connect to existing server
-api_debug_envenv = ApiDebugEnv(base_url="<ENV_HTTP_URL_HERE>")
-
-# Use as normal
-result = api_debug_envenv.reset()
-result = api_debug_envenv.step(ApiDebugAction(message="Hello!"))
-```
-
-Note: When connecting to an existing server, `api_debug_envenv.close()` will NOT stop the server.
-
-### Using the Context Manager
-
-The client supports context manager usage for automatic connection management:
-
-```python
-from api_debug_env import ApiDebugAction, ApiDebugEnv
-
-# Connect with context manager (auto-connects and closes)
-with ApiDebugEnv(base_url="http://localhost:8000") as env:
-    result = env.reset()
-    print(f"Reset: {result.observation.echoed_message}")
-    # Multiple steps with low latency
-    for msg in ["Hello", "World", "!"]:
-        result = env.step(ApiDebugAction(message=msg))
-        print(f"Echoed: {result.observation.echoed_message}")
-```
-
-The client uses WebSocket connections for:
-- **Lower latency**: No HTTP connection overhead per request
-- **Persistent session**: Server maintains your environment state
-- **Efficient for episodes**: Better for many sequential steps
-
-### Concurrent WebSocket Sessions
-
-The server supports multiple concurrent WebSocket connections. To enable this,
-modify `server/app.py` to use factory mode:
-
-```python
-# In server/app.py - use factory mode for concurrent sessions
-app = create_app(
-    ApiDebugEnvironment,  # Pass class, not instance
-    ApiDebugAction,
-    ApiDebugObservation,
-    max_concurrent_envs=4,  # Allow 4 concurrent sessions
-)
-```
-
-Then multiple clients can connect simultaneously:
-
-```python
-from api_debug_env import ApiDebugAction, ApiDebugEnv
-from concurrent.futures import ThreadPoolExecutor
-
-def run_episode(client_id: int):
-    with ApiDebugEnv(base_url="http://localhost:8000") as env:
-        result = env.reset()
-        for i in range(10):
-            result = env.step(ApiDebugAction(message=f"Client {client_id}, step {i}"))
-        return client_id, result.observation.message_length
-
-# Run 4 episodes concurrently
-with ThreadPoolExecutor(max_workers=4) as executor:
-    results = list(executor.map(run_episode, range(4)))
-```
-
-## Development & Testing
-
-### Direct Environment Testing
-
-Test the environment logic directly without starting the HTTP server:
+### Docker
 
 ```bash
-# From the server directory
-python3 server/api_debug_env_environment.py
+cd api_debug_env
+docker build -t api_debug_env:latest -f server/Dockerfile .
+docker run -p 8000:8000 api_debug_env:latest
 ```
 
-This verifies that:
-- Environment resets correctly
-- Step executes actions properly
-- State tracking works
-- Rewards are calculated correctly
-
-### Running Locally
-
-Run the server locally for development:
+### Run Baseline
 
 ```bash
-uvicorn server.app:app --reload
+# Rule-based baseline (no API key needed)
+python scripts/baseline_inference.py --mode rule
+
+# LLM-powered baseline
+export OPENAI_API_KEY=your-key
+python scripts/baseline_inference.py --mode llm
 ```
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/reset` | POST | Reset environment, start new episode |
+| `/step` | POST | Execute an action |
+| `/state` | GET | Get current state |
+| `/tasks` | GET | List all tasks with action schemas |
+| `/grader` | POST | Get grader score for completed episode |
+| `/baseline` | POST | Run baseline inference on all tasks |
+| `/schema` | GET | Get action/observation JSON schemas |
+| `/ws` | WS | WebSocket for persistent sessions |
 
 ## Project Structure
 
 ```
 api_debug_env/
-├── .dockerignore         # Docker build exclusions
-├── __init__.py            # Module exports
-├── README.md              # This file
-├── openenv.yaml           # OpenEnv manifest
-├── pyproject.toml         # Project metadata and dependencies
-├── uv.lock                # Locked dependencies (generated)
-├── client.py              # ApiDebugEnv client
-├── models.py              # Action and Observation models
-└── server/
-    ├── __init__.py        # Server module exports
-    ├── api_debug_env_environment.py  # Core environment logic
-    ├── app.py             # FastAPI application (HTTP + WebSocket endpoints)
-    └── Dockerfile         # Container image definition
+├── models.py           # Pydantic Action & Observation models
+├── scenarios.py        # 3 task scenarios with issues, logs, configs
+├── client.py           # WebSocket client for the environment
+├── openenv.yaml        # OpenEnv metadata
+├── pyproject.toml      # Dependencies & build config
+├── server/
+│   ├── app.py                        # FastAPI application
+│   ├── api_debug_env_environment.py  # Core environment logic
+│   └── Dockerfile                    # Container build
+└── scripts/
+    └── baseline_inference.py         # Baseline agent script
 ```
+
+## License
+
+BSD-style license. See LICENSE file.
