@@ -37,13 +37,13 @@ except Exception as e:
 try:
     from ..models import ApiDebugAction, ApiDebugObservation
     from .api_debug_env_environment import ApiDebugEnvironment
-except ModuleNotFoundError:
+except ImportError:
     from models import ApiDebugAction, ApiDebugObservation
     from server.api_debug_env_environment import ApiDebugEnvironment
 
 try:
     from ..scenarios import get_all_task_ids, get_scenario
-except ModuleNotFoundError:
+except ImportError:
     from scenarios import get_all_task_ids, get_scenario
 
 
@@ -56,6 +56,18 @@ app = create_app(
     env_name="api_debug_env",
     max_concurrent_envs=3,
 )
+
+# ─── Root endpoint (required: hackathon validator pings / and expects 200) ────
+
+@app.get("/")
+async def root():
+    """Root endpoint — returns environment info and available endpoints."""
+    return {
+        "name": "api_debug_env",
+        "description": "API Integration Debugging Environment",
+        "status": "running",
+        "endpoints": ["/reset", "/step", "/state", "/tasks", "/grader", "/baseline", "/health", "/schema", "/docs"],
+    }
 
 
 # ─── Hackathon-required endpoints ─────────────────────────────────────────────

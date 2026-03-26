@@ -1,3 +1,14 @@
+---
+title: Api Debug Env
+emoji: 🛠️
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+pinned: false
+app_port: 8000
+tags:
+  - openenv
+---
 # API Integration Debugging Environment
 
 An OpenEnv environment where AI agents diagnose and fix broken API integrations — a real-world task that developers face daily.
