@@ -394,25 +394,31 @@ class ApiDebugEnvironment(Environment):
         """
         Grade the agent's performance on the current episode.
 
-        Score = (issues_fixed / issues_total) * efficiency_bonus
+        Score = (issues_fixed / issues_total) * efficiency_bonus + exploration_bonus
         Efficiency bonus = 1.0 + (remaining_steps / max_steps * 0.3)
+        Exploration bonus = small credit for inspecting services (max 0.05)
 
         Returns:
-            Score between 0.0 and 1.0
+            Score strictly between 0 and 1 (exclusive): in range (0.001, 0.999)
         """
         if self._scenario is None:
-            return 0.0
+            return 0.001
 
         total = len(self._scenario.issues)
         if total == 0:
-            return 1.0
+            return 0.999
 
         fix_ratio = len(self._issues_fixed) / total
         remaining = max(0, self._scenario.max_steps - self._state.step_count)
         efficiency_bonus = 1.0 + (remaining / self._scenario.max_steps * 0.3)
 
-        score = fix_ratio * efficiency_bonus
-        return min(1.0, round(score, 4))
+        # Small partial credit for exploration even if no fixes submitted
+        exploration_bonus = min(0.05, len(self._inspected_targets) * 0.005)
+
+        score = fix_ratio * efficiency_bonus + exploration_bonus
+
+        # Clamp strictly to (0.001, 0.999) — never exactly 0 or 1
+        return max(0.001, min(0.999, round(score, 4)))
 
     def get_task_info(self) -> Dict[str, Any]:
         """Return information about the current task."""
