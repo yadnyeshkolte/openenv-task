@@ -174,4 +174,4 @@ api_debug_env/
 
 ## License
 
-BSD-style license. See LICENSE file.
+BSD-style license. See LICENSE file
