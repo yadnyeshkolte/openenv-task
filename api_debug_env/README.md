@@ -158,6 +158,7 @@ python scripts/baseline_inference.py --mode llm
 
 ```
 api_debug_env/
+├── inference.py        # ★ MANDATORY hackathon inference script
 ├── models.py           # Pydantic Action & Observation models
 ├── scenarios.py        # 3 task scenarios with issues, logs, configs
 ├── client.py           # WebSocket client for the environment
@@ -168,7 +169,7 @@ api_debug_env/
 │   ├── api_debug_env_environment.py  # Core environment logic
 │   └── Dockerfile                    # Container build
 └── scripts/
-    └── baseline_inference.py         # Baseline agent script
+    └── baseline_inference.py         # Original baseline agent script
 ```
 
 ## License
