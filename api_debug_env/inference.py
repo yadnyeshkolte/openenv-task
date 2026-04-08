@@ -91,7 +91,7 @@ def log_step(step: int, action: str, reward: float, done: bool, error: Optional[
 def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
-        f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
+        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
         flush=True,
     )
 
@@ -176,7 +176,7 @@ async def run_task(task_id: str, client: OpenAI) -> tuple:
 
     rewards: List[float] = []
     steps_taken = 0
-    score = 0.0
+    score = 0.001
     success = False
 
     log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
@@ -208,8 +208,8 @@ async def run_task(task_id: str, client: OpenAI) -> tuple:
             if done:
                 break
 
-        score = env.grade()
-        score = min(max(score, 0.0), 1.0)
+        score = env.grade()  # already clamped to (0.001, 0.999)
+        score = max(0.001, min(0.999, score))
         success = score >= SUCCESS_SCORE_THRESHOLD
 
     except Exception as e:

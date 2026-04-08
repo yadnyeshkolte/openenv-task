@@ -133,7 +133,7 @@ async def run_grader(request: GraderRequest):
 
     return {
         "task_id": task_id,
-        "score": 0.0,
+        "score": 0.001,
         "message": "No completed episode found. Run the environment first.",
     }
 

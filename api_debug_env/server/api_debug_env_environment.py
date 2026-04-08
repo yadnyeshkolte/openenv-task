@@ -417,7 +417,7 @@ class ApiDebugEnvironment(Environment):
 
         score = fix_ratio * efficiency_bonus + exploration_bonus
 
-        # Clamp strictly to (0.001, 0.999) — never exactly 0 or 1
+        # Clamp strictly to (0.001, 0.999) — NEVER exactly 0.0 or 1.0
         return max(0.001, min(0.999, round(score, 4)))
 
     def get_task_info(self) -> Dict[str, Any]:
