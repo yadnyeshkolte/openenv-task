@@ -46,31 +46,39 @@ MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
 BENCHMARK = "api_debug_env"
 MAX_STEPS = 40  # max across all tasks (hard has 40)
 TEMPERATURE = 0.3
-MAX_TOKENS = 800
+MAX_TOKENS = 1024
 SUCCESS_SCORE_THRESHOLD = 0.1
 
 SYSTEM_PROMPT = textwrap.dedent("""
 You are an expert API debugging agent. You are tasked with diagnosing and fixing
-broken API integrations. You interact with a simulated multi-service environment.
+broken API integrations in a multi-service environment.
 
-Available actions (respond with JSON):
+## Available Actions (respond with JSON only):
 {
   "action_type": "inspect_logs" | "inspect_config" | "inspect_endpoint" | "submit_fix",
   "target": "<service_name>",
   "fix_payload": { ... }  // required only for submit_fix
 }
 
-Strategy:
-1. First inspect_logs on each service to identify error patterns
-2. Then inspect_config to understand current (broken) settings
-3. Use inspect_endpoint to see actual error responses
-4. Submit fixes with corrected configuration values
+## Debugging Strategy (follow this order):
+1. **Inspect logs** on each service to identify error patterns and root causes
+2. **Inspect config** to understand current (broken) settings
+3. **Inspect endpoint** to see actual error responses if needed
+4. **Submit fix** with corrected configuration values
 
-IMPORTANT: When submitting a fix, include ALL the corrected key-value pairs in fix_payload.
-For nested keys like "headers.Authorization", use the nested format:
-{"headers.Authorization": "Bearer <token>"}
+## Key Rules:
+- ALWAYS inspect logs and configs BEFORE submitting fixes
+- Pay attention to the service dependency graph — upstream failures cascade downstream
+- Fix upstream issues first (they may mask downstream problems)
+- When submitting a fix, use the exact key format from the config
+  - For nested keys: {"headers.Authorization": "Bearer <token>"}
+  - For nested objects: {"retry": {"max_retries": 3, "backoff_factor": 2}}
+- Check service_status to see which services are healthy/degraded/error
+- After fixing, re-inspect logs on affected services — new logs appear showing the fix effect
 
-Respond with ONLY valid JSON. No explanation text.
+## Response Format:
+Respond with ONLY a single JSON object. No text, no explanation, no markdown.
+Example: {"action_type": "inspect_logs", "target": "payment_client"}
 """).strip()
 
 
@@ -100,26 +108,46 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
 # ─── LLM Interaction ────────────────────────────────────────────────────────────
 
 def build_user_prompt(obs: ApiDebugObservation, step: int) -> str:
-    """Build a prompt from the current observation."""
+    """Build a detailed prompt from the current observation."""
     parts = [
-        f"Step: {step}",
+        f"=== Step {step} ===",
         f"Task: {obs.task_description}",
         f"Remaining steps: {obs.remaining_steps}",
         f"Issues found: {obs.issues_found}/{obs.issues_total}",
         f"Issues fixed: {obs.issues_fixed}/{obs.issues_total}",
         f"Last action result: {obs.action_result}",
-        f"Available targets: {obs.available_targets}",
     ]
+
+    # Show service health (dynamic state)
+    if obs.service_status:
+        status_str = ", ".join(f"{svc}={status}" for svc, status in obs.service_status.items())
+        parts.append(f"Service health: {status_str}")
+
+    # Show dependency graph
+    if obs.dependency_graph:
+        deps = []
+        for svc, dep_list in obs.dependency_graph.items():
+            if dep_list:
+                deps.append(f"  {svc} -> {', '.join(dep_list)}")
+        if deps:
+            parts.append("Service dependencies:\n" + "\n".join(deps))
+
+    # Show error cascades
+    if obs.error_trace:
+        parts.append("Active error cascades:\n" + "\n".join(f"  {t}" for t in obs.error_trace[:5]))
+
+    parts.append(f"Available targets: {obs.available_targets}")
 
     if obs.logs:
         parts.append("Logs:\n" + "\n".join(obs.logs))
     if obs.config_snapshot:
-        parts.append(f"Config: {json.dumps(obs.config_snapshot, indent=2)}")
+        parts.append(f"Config:\n{json.dumps(obs.config_snapshot, indent=2)}")
     if obs.api_response:
-        parts.append(f"API Response: {json.dumps(obs.api_response, indent=2)}")
+        parts.append(f"API Response:\n{json.dumps(obs.api_response, indent=2)}")
     if obs.hints:
         parts.append(f"Hints: {'; '.join(obs.hints)}")
 
+    parts.append("\nDecide your next action. Respond with ONLY a JSON object.")
     return "\n".join(parts)
 
 
@@ -152,6 +180,14 @@ def get_model_action(
                 json_end = text.rfind("}") + 1
                 if json_start >= 0 and json_end > json_start:
                     text = text[json_start:json_end]
+            elif text.startswith("{"):
+                pass  # Already JSON
+            else:
+                # Try to extract JSON from mixed text
+                json_start = text.find("{")
+                json_end = text.rfind("}") + 1
+                if json_start >= 0 and json_end > json_start:
+                    text = text[json_start:json_end]
 
             action_json = json.loads(text)
             messages.append({"role": "assistant", "content": json.dumps(action_json)})
@@ -164,6 +200,9 @@ def get_model_action(
         except json.JSONDecodeError as exc:
             print(f"[DEBUG] JSON parse failed (attempt {attempt+1}/{max_retries}): {exc}", flush=True)
             last_error = exc
+            # Add corrective message
+            messages.append({"role": "assistant", "content": text if 'text' in dir() else ""})
+            messages.append({"role": "user", "content": "Invalid response. Respond with ONLY a valid JSON object like: {\"action_type\": \"inspect_logs\", \"target\": \"payment_client\"}"})
         except Exception as exc:
             print(f"[DEBUG] API call failed (attempt {attempt+1}/{max_retries}): {exc}", flush=True)
             last_error = exc

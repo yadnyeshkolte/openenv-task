@@ -6,8 +6,18 @@
 
 """Api Debug Env Environment."""
 
-from .client import ApiDebugEnv
-from .models import ApiDebugAction, ApiDebugObservation
+try:
+    from .client import ApiDebugEnv
+    from .models import ApiDebugAction, ApiDebugObservation
+except ImportError:
+    # When running tests or scripts directly from the project root,
+    # relative imports won't work. Fall back to absolute imports.
+    try:
+        from client import ApiDebugEnv
+        from models import ApiDebugAction, ApiDebugObservation
+    except ImportError:
+        ApiDebugEnv = None  # type: ignore
+        from models import ApiDebugAction, ApiDebugObservation
 
 __all__ = [
     "ApiDebugAction",

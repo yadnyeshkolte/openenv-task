@@ -64,8 +64,15 @@ async def root():
     """Root endpoint — returns environment info and available endpoints."""
     return {
         "name": "api_debug_env",
-        "description": "API Integration Debugging Environment",
+        "description": "API Integration Debugging Environment — diagnose and fix broken API integrations",
+        "version": "2.0.0",
         "status": "running",
+        "features": [
+            "Cascading failure simulation",
+            "Dynamic service health tracking",
+            "Multi-dimensional rubric grading",
+            "Seed-based scenario randomization",
+        ],
         "endpoints": ["/reset", "/step", "/state", "/tasks", "/grader", "/baseline", "/health", "/schema", "/docs"],
     }
 
@@ -86,7 +93,7 @@ class BaselineRequest(BaseModel):
 
 @app.get("/tasks")
 async def list_tasks():
-    """Return list of all tasks with action schema."""
+    """Return list of all tasks with action schema and dependency info."""
     tasks = []
     for task_id in get_all_task_ids():
         scenario = get_scenario(task_id)
@@ -97,6 +104,11 @@ async def list_tasks():
             "max_steps": scenario.max_steps,
             "issues_count": len(scenario.issues),
             "services": scenario.services,
+            "service_dependencies": {
+                svc: node.depends_on
+                for svc, node in scenario.service_graph.items()
+            },
+            "context": scenario.context,
             "action_schema": {
                 "action_type": {
                     "type": "string",
@@ -129,6 +141,12 @@ async def run_grader(request: GraderRequest):
             "issues_fixed": len(env._issues_fixed),
             "issues_total": len(env._scenario.issues) if env._scenario else 0,
             "steps_used": env._state.step_count,
+            "grading_rubric": {
+                "fix_score_weight": 0.40,
+                "diagnosis_score_weight": 0.20,
+                "efficiency_score_weight": 0.15,
+                "strategy_score_weight": 0.25,
+            },
         }
 
     return {
@@ -142,13 +160,19 @@ async def run_grader(request: GraderRequest):
 async def run_baseline(request: Optional[BaselineRequest] = None):
     """
     Run a rule-based baseline agent on all tasks.
-    The baseline inspects logs/configs and then submits known fixes.
+
+    The baseline follows a proper debugging strategy:
+    1. Inspect logs for each service (diagnosis phase)
+    2. Inspect configs for services with issues (investigation phase)
+    3. Submit known fixes (resolution phase)
+
     Returns baseline scores for each task.
     """
     # Known fixes for each task (a heuristic baseline, not an LLM)
     known_fixes = {
         "easy": [
-            {"target": "payment_client", "fix": {"headers.Authorization": "Bearer sk_live_token123", "headers.Content-Type": "application/json"}},
+            {"target": "payment_client", "fix": {"headers.Authorization": "Bearer sk_live_token123"}},
+            {"target": "payment_client", "fix": {"headers.Content-Type": "application/json"}},
         ],
         "medium": [
             {"target": "webhook_sender", "fix": {"rate_limit.requests_per_second": 10}},
@@ -170,7 +194,7 @@ async def run_baseline(request: Optional[BaselineRequest] = None):
         env = ApiDebugEnvironment(task_id=task_id)
         obs = env.reset()
 
-        # Phase 1: Inspect all logs
+        # Phase 1: Inspect all logs (proper diagnosis strategy)
         for service in obs.available_targets:
             if env._done:
                 break
@@ -179,7 +203,7 @@ async def run_baseline(request: Optional[BaselineRequest] = None):
                 target=service,
             ))
 
-        # Phase 2: Inspect all configs
+        # Phase 2: Inspect configs for services that have issues
         for service in obs.available_targets:
             if env._done:
                 break
@@ -188,7 +212,16 @@ async def run_baseline(request: Optional[BaselineRequest] = None):
                 target=service,
             ))
 
-        # Phase 3: Submit fixes
+        # Phase 3: Test endpoints to observe failures
+        for service in obs.available_targets[:2]:  # Just test a couple
+            if env._done:
+                break
+            obs = env.step(ApiDebugAction(
+                action_type="inspect_endpoint",
+                target=service,
+            ))
+
+        # Phase 4: Submit fixes
         for fix_info in known_fixes.get(task_id, []):
             if env._done:
                 break

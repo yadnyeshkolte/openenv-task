@@ -9,9 +9,12 @@ Data models for the API Integration Debugging Environment.
 
 An agent must diagnose and fix broken API integrations by reading error logs,
 inspecting configurations, and writing corrected API calls.
+
+The observation space includes dynamic state: service health, dependency graph,
+and error traces that update as the agent fixes issues.
 """
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from openenv.core.env_server.types import Action, Observation
 from pydantic import Field
@@ -47,7 +50,7 @@ class ApiDebugObservation(Observation):
     What the agent sees after each action.
 
     Provides error logs, configuration snapshots, API responses,
-    and progress tracking for the debugging task.
+    service health status, dependency graph, and progress tracking.
     """
 
     # Environment context
@@ -59,6 +62,20 @@ class ApiDebugObservation(Observation):
     config_snapshot: Dict = Field(default_factory=dict, description="Current configuration of the inspected component")
     api_response: Optional[Dict] = Field(default=None, description="Response from testing the current endpoint config")
     hints: List[str] = Field(default_factory=list, description="Progressive hints based on step count")
+
+    # Dynamic state (NEW — makes the environment interactive)
+    service_status: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Current health of each service: 'healthy', 'degraded', 'error', 'unreachable'",
+    )
+    dependency_graph: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="Service dependency graph: {service: [services it depends on]}",
+    )
+    error_trace: List[str] = Field(
+        default_factory=list,
+        description="Error propagation chain showing how failures cascade across services",
+    )
 
     # Progress tracking
     remaining_steps: int = Field(default=0, description="Steps remaining before episode timeout")
