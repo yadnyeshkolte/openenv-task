@@ -22,6 +22,13 @@ Agents interact with a simulated multi-service API ecosystem that has various mi
 3. **Test endpoints** to observe current behavior
 4. **Submit fixes** with corrected configuration payloads
 
+The environment features:
+- **3 difficulty levels** with increasing complexity (2, 3, and 5 issues)
+- **Strict value validation** on fixes (grader checks both key AND value)
+- **Seed-based randomization** for reproducible yet varied episodes
+- **Penalty for repeated inspections** to encourage efficient exploration
+- **Comprehensive test suite** with 30+ unit tests
+
 ## Action Space
 
 ```python
@@ -33,10 +40,11 @@ class ApiDebugAction(Action):
 
 | Action | Description | Reward |
 |--------|-------------|--------|
-| `inspect_logs` | Read error logs for a service | +0.05 (relevant) / +0.15 (finds new issue) |
-| `inspect_config` | View current config of a service | +0.02 to +0.05 |
+| `inspect_logs` | Read error logs for a service | +0.15 (finds new issue) / +0.05 (first time, no issue) / 0.0 (repeat) |
+| `inspect_config` | View current config of a service | +0.05 (has issues) / +0.01 (no issues) / 0.0 (repeat) |
 | `inspect_endpoint` | Test-call an endpoint | +0.02 to +0.05 |
 | `submit_fix` | Submit a configuration fix | +0.25 (correct) / -0.1 (wrong) |
+| *step cost* | Applied every step | -0.01 |
 
 ## Observation Space
 
@@ -78,29 +86,52 @@ class ApiDebugObservation(Observation):
 
 ## Reward Function
 
-- **Partial progress**: Every useful inspection earns reward (+0.05 to +0.15)
-- **Fix rewards**: +0.25 per correctly fixed issue
+- **Step cost**: -0.01 per step to encourage efficiency
+- **Partial progress**: First useful inspection earns reward (+0.05 to +0.15)
+- **Repeated inspection**: 0 reward (prevents reward farming)
+- **Fix rewards**: +0.25 per correctly fixed issue (strict key+value validation)
 - **Completion bonus**: +0.2 when all issues are resolved
 - **Penalties**: -0.1 for wrong fixes, -0.05 for invalid actions
 
 ## Grading
 
 ```
-Score = (issues_fixed / issues_total) × efficiency_bonus
+Score = (issues_fixed / issues_total) × efficiency_bonus + exploration_bonus
 efficiency_bonus = 1.0 + (remaining_steps / max_steps × 0.3)
+exploration_bonus = issues_found / issues_total × 0.1
 ```
 
-Faster fixes earn up to 30% bonus. Score capped at 1.0.
+Faster fixes earn up to 30% bonus. Scores strictly clamped to (0.001, 0.999).
 
-## Baseline Scores
+## Baseline Scores (Rule-Based Agent)
 
-| Task | Score | Reward | Issues Found | Issues Fixed | Steps |
-|------|-------|--------|-------------|-------------|-------|
-| Easy | 0.0000 | 0.34 | 2/2 | 0/2 | 6 |
-| Medium | 0.0000 | 0.53 | 3/3 | 0/3 | 9 |
-| Hard | 0.0000 | 0.87 | 5/5 | 0/5 | 15 |
+| Task | Score | Issues Fixed | Issues Total | Steps |
+|------|-------|-------------|-------------|-------|
+| Easy | ~0.85 | 2/2 | 2 | 6 |
+| Medium | ~0.65 | 3/3 | 3 | 9 |
+| Hard | ~0.55 | 5/5 | 5 | 15 |
 
-> The rule-based baseline only explores (inspects) without submitting fixes, establishing a floor. An LLM agent that also fixes issues will score significantly higher.
+> The rule-based baseline inspects logs/configs then submits known fixes. An LLM agent with proper reasoning can achieve higher scores by solving issues more efficiently.
+
+## Example Interaction (Easy Task)
+
+```text
+[START] task=easy env=api_debug_env model=Qwen/Qwen2.5-72B-Instruct
+
+# Agent inspects logs and finds Auth error
+[STEP] step=1 action=inspect_logs(target=payment_client) reward=0.14 done=false error=null
+
+# Agent checks config to understand current headers
+[STEP] step=2 action=inspect_config(target=payment_client) reward=0.04 done=false error=null
+
+# Agent fixes the authorization header
+[STEP] step=3 action=submit_fix(target=payment_client,fix={"headers.Authorization":"Bearer sk_live_token123"}) reward=0.24 done=false error=null
+
+# Agent fixes the content type
+[STEP] step=4 action=submit_fix(target=payment_client,fix={"headers.Content-Type":"application/json"}) reward=0.44 done=true error=null
+
+[END] success=true steps=4 score=0.899 rewards=0.14,0.04,0.24,0.44
+```
 
 ## Setup & Usage
 
@@ -130,21 +161,28 @@ docker build -t api_debug_env:latest -f server/Dockerfile .
 docker run -p 8000:8000 api_debug_env:latest
 ```
 
-### Run Baseline
+### Run Inference
 
 ```bash
-# Rule-based baseline (no API key needed)
-python scripts/baseline_inference.py --mode rule
+# Set API credentials
+export HF_TOKEN=your-key
 
-# LLM-powered baseline
-export OPENAI_API_KEY=your-key
-python scripts/baseline_inference.py --mode llm
+# Run inference on all tasks
+python inference.py
+```
+
+### Run Tests
+
+```bash
+cd api_debug_env
+pytest tests/ -v --tb=short
 ```
 
 ### API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
+| `/` | GET | Root — environment info and links |
 | `/reset` | POST | Reset environment, start new episode |
 | `/step` | POST | Execute an action |
 | `/state` | GET | Get current state |
@@ -152,7 +190,7 @@ python scripts/baseline_inference.py --mode llm
 | `/grader` | POST | Get grader score for completed episode |
 | `/baseline` | POST | Run baseline inference on all tasks |
 | `/schema` | GET | Get action/observation JSON schemas |
-| `/ws` | WS | WebSocket for persistent sessions |
+| `/health` | GET | Health check endpoint |
 
 ## Project Structure
 
@@ -160,18 +198,27 @@ python scripts/baseline_inference.py --mode llm
 api_debug_env/
 ├── inference.py        # ★ MANDATORY hackathon inference script
 ├── models.py           # Pydantic Action & Observation models
-├── scenarios.py        # 3 task scenarios with issues, logs, configs
+├── scenarios.py        # 3 task scenarios with randomization support
 ├── client.py           # WebSocket client for the environment
-├── openenv.yaml        # OpenEnv metadata
+├── openenv.yaml        # OpenEnv metadata (spec v1)
 ├── pyproject.toml      # Dependencies & build config
 ├── server/
 │   ├── app.py                        # FastAPI application
 │   ├── api_debug_env_environment.py  # Core environment logic
 │   └── Dockerfile                    # Container build
+├── tests/
+│   └── test_environment.py           # 30+ unit & integration tests
 └── scripts/
     └── baseline_inference.py         # Original baseline agent script
 ```
 
+## Randomization & Reproducibility
+
+The environment supports seed-based randomization via `reset(seed=42)`. This:
+- Shuffles log entry order so agents can't memorize positions
+- Ensures reproducible episodes for consistent evaluation
+- When `seed=None` (default), returns the canonical scenario for testing
+
 ## License
 
-BSD-style license. See LICENSE file
+BSD-style license. See LICENSE file.

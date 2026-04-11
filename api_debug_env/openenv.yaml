@@ -8,23 +8,18 @@ port: 8000
 description: >
   API Integration Debugging Environment — an AI agent must diagnose and fix
   broken API integrations by reading error logs, inspecting configurations,
-  and submitting corrected API calls.
+  and submitting corrected API calls. Supports 3 difficulty levels with
+  seed-based randomization for reproducible evaluation.
 
 tasks:
   - id: easy
     description: "Fix missing Authorization header and wrong Content-Type in a payment API client"
-    difficulty: easy
     max_steps: 15
-    issues_count: 2
 
   - id: medium
     description: "Debug a webhook chain with rate limiting, retry, and signature validation failures"
-    difficulty: medium
     max_steps: 25
-    issues_count: 3
 
   - id: hard
-    description: "Diagnose cascading failures across a 3-service order processing pipeline"
-    difficulty: hard
+    description: "Diagnose cascading failures across a 5-service order processing pipeline"
     max_steps: 40
-    issues_count: 5

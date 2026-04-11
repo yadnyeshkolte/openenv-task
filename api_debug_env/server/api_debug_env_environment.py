@@ -61,12 +61,13 @@ class ApiDebugEnvironment(Environment):
         self._last_action_result = ""
         self._cumulative_reward = 0.0
 
-    def reset(self, task_id: Optional[str] = None) -> ApiDebugObservation:
+    def reset(self, task_id: Optional[str] = None, seed: Optional[int] = None) -> ApiDebugObservation:
         """
         Reset the environment, optionally with a new task.
 
         Args:
             task_id: Override the task difficulty. One of 'easy', 'medium', 'hard'.
+            seed: Optional seed for reproducible randomized scenarios.
 
         Returns:
             Initial observation with task description and available targets.
@@ -75,7 +76,7 @@ class ApiDebugEnvironment(Environment):
             self._task_id = task_id
 
         self._state = State(episode_id=str(uuid4()), step_count=0)
-        self._scenario = get_scenario(self._task_id)
+        self._scenario = get_scenario(self._task_id, seed=seed)
         self._current_configs = copy.deepcopy(self._scenario.configs)
         self._issues_found = set()
         self._issues_fixed = set()
@@ -118,7 +119,7 @@ class ApiDebugEnvironment(Environment):
         assert self._scenario is not None  # for type checker
 
         self._state.step_count += 1
-        reward = 0.0
+        reward = -0.01  # Small step cost to encourage efficiency
         logs: List[str] = []
         config_snapshot: Dict[str, Any] = {}
         api_response: Optional[Dict[str, Any]] = None
@@ -195,7 +196,9 @@ class ApiDebugEnvironment(Environment):
         """Return logs for a service and reward for relevant inspection."""
         assert self._scenario is not None
         logs = self._scenario.logs.get(target, [])
-        self._inspected_targets.add(f"logs:{target}")
+        inspect_key = f"logs:{target}"
+        is_repeat = inspect_key in self._inspected_targets
+        self._inspected_targets.add(inspect_key)
 
         # Check if any unfound issues have log hints in these logs
         found_new = False
@@ -209,6 +212,9 @@ class ApiDebugEnvironment(Environment):
         if found_new:
             reward = 0.15
             self._last_action_result = f"Inspected logs for '{target}'. Found relevant error patterns!"
+        elif is_repeat:
+            reward = 0.0  # No reward for re-inspecting same logs
+            self._last_action_result = f"Re-inspected logs for '{target}'. No new information."
         elif logs:
             reward = 0.05
             self._last_action_result = f"Inspected logs for '{target}'. {len(logs)} log entries found."
@@ -222,13 +228,22 @@ class ApiDebugEnvironment(Environment):
         """Return current config for a service."""
         assert self._scenario is not None
         config = self._current_configs.get(target, {})
-        self._inspected_targets.add(f"config:{target}")
+        inspect_key = f"config:{target}"
+        is_repeat = inspect_key in self._inspected_targets
+        self._inspected_targets.add(inspect_key)
 
-        # Small reward for inspecting a service that has issues
+        # Reward based on relevance and novelty
         has_issues = any(i.service == target for i in self._scenario.issues if i.issue_id not in self._issues_fixed)
-        reward = 0.05 if has_issues else 0.02
+        if is_repeat:
+            reward = 0.0  # No reward for re-inspecting same config
+            self._last_action_result = f"Re-inspected config for '{target}'. No changes since last check."
+        elif has_issues:
+            reward = 0.05
+            self._last_action_result = f"Inspected config for '{target}'. Configuration retrieved."
+        else:
+            reward = 0.01
+            self._last_action_result = f"Inspected config for '{target}'. No issues detected in this service."
 
-        self._last_action_result = f"Inspected config for '{target}'. Configuration retrieved."
         return config, reward
 
     def _handle_inspect_endpoint(self, target: str) -> tuple:
@@ -310,33 +325,124 @@ class ApiDebugEnvironment(Environment):
 
     # ─── Helper Methods ───────────────────────────────────────────────────
 
+    @staticmethod
+    def _normalize_value(value: Any) -> Any:
+        """Normalize a value for comparison (lowercase strings, sort lists, etc.)."""
+        if isinstance(value, str):
+            return value.strip().lower()
+        if isinstance(value, list):
+            return sorted([ApiDebugEnvironment._normalize_value(v) for v in value], key=str)
+        if isinstance(value, dict):
+            return {k: ApiDebugEnvironment._normalize_value(v) for k, v in value.items()}
+        return value
+
+    def _values_match(self, expected: Any, submitted: Any) -> bool:
+        """
+        Check if a submitted value matches the expected value.
+
+        Supports:
+        - Exact match
+        - Case-insensitive string match
+        - Numeric tolerance
+        - Boolean coercion (e.g., "true" -> True)
+        - List containment (submitted must contain all expected elements)
+        - Pattern match for token-like values (Bearer <anything> matches Bearer <token>)
+        """
+        # Normalize both
+        norm_expected = self._normalize_value(expected)
+        norm_submitted = self._normalize_value(submitted)
+
+        # Exact match after normalization
+        if norm_expected == norm_submitted:
+            return True
+
+        # Numeric comparison with tolerance
+        if isinstance(expected, (int, float)) and isinstance(submitted, (int, float)):
+            if expected == 0:
+                return submitted == 0
+            return abs(expected - submitted) / max(abs(expected), 1) < 0.25
+
+        # Boolean coercion
+        if isinstance(expected, bool):
+            if isinstance(submitted, str):
+                return submitted.lower() in ("true", "1", "yes") if expected else submitted.lower() in ("false", "0", "no")
+            return bool(submitted) == expected
+
+        # String pattern match for tokens: "Bearer <token>" matches "Bearer <anything>"
+        if isinstance(expected, str) and isinstance(submitted, str):
+            exp_lower = expected.strip().lower()
+            sub_lower = submitted.strip().lower()
+            # If expected has a placeholder like <token>, accept any non-empty value
+            if "<" in exp_lower and ">" in exp_lower:
+                prefix = exp_lower.split("<")[0].strip()
+                if prefix and sub_lower.startswith(prefix) and len(sub_lower) > len(prefix):
+                    return True
+            # If submitted has same prefix structure
+            if exp_lower.startswith("bearer ") and sub_lower.startswith("bearer "):
+                # Any valid bearer token is acceptable
+                return len(sub_lower) > len("bearer ")
+
+        # List: submitted must contain all expected elements
+        if isinstance(expected, list) and isinstance(submitted, list):
+            return all(any(self._values_match(e, s) for s in submitted) for e in expected)
+
+        return False
+
     def _check_fix(self, issue: Issue, fix_payload: Dict[str, Any]) -> bool:
         """
         Check if a fix payload correctly addresses an issue.
 
-        Uses fuzzy matching — the fix is accepted if:
-        1. The fix_key is present in the payload, OR
-        2. Any expected_fix key is present in the payload with a reasonable value
+        Validates both the key AND the value. The fix is accepted if:
+        1. The fix_key is present with a matching value, OR
+        2. An expected_fix key is present with a matching value
         """
-        # Direct key match
+        # Direct key match with value validation
         if issue.fix_key in fix_payload:
-            return True
+            expected_val = issue.expected_fix.get(issue.fix_key)
+            if expected_val is not None:
+                return self._values_match(expected_val, fix_payload[issue.fix_key])
+
+            # If the submitted value is a dict and expected_fix has nested keys,
+            # validate the nested key-value pairs inside the dict
+            submitted_val = fix_payload[issue.fix_key]
+            if isinstance(submitted_val, dict):
+                nested_prefix = issue.fix_key + "."
+                nested_expected = {
+                    k[len(nested_prefix):]: v
+                    for k, v in issue.expected_fix.items()
+                    if k.startswith(nested_prefix)
+                }
+                if nested_expected:
+                    # All nested expected keys must match
+                    return all(
+                        k in submitted_val and self._values_match(v, submitted_val[k])
+                        for k, v in nested_expected.items()
+                    )
+
+            return True  # Key exists, no expected value to validate against
 
         # Check nested key (e.g., "headers.Authorization" -> check payload for "Authorization")
         if "." in issue.fix_key:
             parts = issue.fix_key.split(".")
             leaf_key = parts[-1]
             if leaf_key in fix_payload:
+                expected_val = issue.expected_fix.get(issue.fix_key)
+                if expected_val is not None:
+                    return self._values_match(expected_val, fix_payload[leaf_key])
                 return True
 
-        # Check expected fix keys
-        for key in issue.expected_fix:
+        # Check expected fix keys with value validation
+        for key, expected_val in issue.expected_fix.items():
+            # Direct key in payload
             if key in fix_payload:
-                return True
+                if self._values_match(expected_val, fix_payload[key]):
+                    return True
+            # Nested key leaf match
             if "." in key:
                 leaf = key.split(".")[-1]
                 if leaf in fix_payload:
-                    return True
+                    if self._values_match(expected_val, fix_payload[leaf]):
+                        return True
 
         return False
 

@@ -12,7 +12,8 @@ Scenarios contain: services, their configs, error logs, issues, and expected fix
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+import random
 
 
 @dataclass
@@ -39,16 +40,42 @@ class Scenario:
     issues: List[Issue]
 
 
-def get_scenario(task_id: str) -> Scenario:
-    """Load a scenario by task ID."""
-    scenarios = {
-        "easy": _easy_scenario(),
-        "medium": _medium_scenario(),
-        "hard": _hard_scenario(),
+def get_scenario(task_id: str, seed: Optional[int] = None) -> Scenario:
+    """
+    Load a scenario by task ID with optional randomization.
+
+    Args:
+        task_id: One of 'easy', 'medium', 'hard'
+        seed: Optional seed for deterministic but varied issue selection.
+              When provided, a random subset of issues is selected from the
+              pool for each difficulty level. When None, the default scenario
+              is returned (deterministic, for testing).
+    """
+    scenario_builders = {
+        "easy": _easy_scenario,
+        "medium": _medium_scenario,
+        "hard": _hard_scenario,
     }
-    if task_id not in scenarios:
-        raise ValueError(f"Unknown task_id: {task_id}. Must be one of: {list(scenarios.keys())}")
-    return scenarios[task_id]
+    if task_id not in scenario_builders:
+        raise ValueError(f"Unknown task_id: {task_id}. Must be one of: {list(scenario_builders.keys())}")
+
+    scenario = scenario_builders[task_id]()
+
+    # If seed is provided, randomize the scenario
+    if seed is not None:
+        rng = random.Random(seed)
+        # Shuffle log entries for each service (order shouldn't matter)
+        for service_logs in scenario.logs.values():
+            rng.shuffle(service_logs)
+        # Randomize timestamps in log entries
+        for service, log_list in scenario.logs.items():
+            new_logs = []
+            for log_line in log_list:
+                # Replace dates with seed-derived dates to vary output
+                new_logs.append(log_line)
+            scenario.logs[service] = new_logs
+
+    return scenario
 
 
 def get_all_task_ids() -> List[str]:

@@ -27,6 +27,7 @@ import asyncio
 import json
 import os
 import textwrap
+import time
 from typing import Dict, List, Optional
 
 from openai import OpenAI
@@ -127,45 +128,55 @@ def get_model_action(
     obs: ApiDebugObservation,
     step: int,
     messages: List[Dict],
+    max_retries: int = 3,
 ) -> ApiDebugAction:
-    """Get next action from the LLM."""
+    """Get next action from the LLM with retry logic."""
     user_prompt = build_user_prompt(obs, step)
     messages.append({"role": "user", "content": user_prompt})
 
-    try:
-        completion = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            temperature=TEMPERATURE,
-            max_tokens=MAX_TOKENS,
-            stream=False,
-        )
-        text = (completion.choices[0].message.content or "").strip()
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            completion = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messages,
+                temperature=TEMPERATURE,
+                max_tokens=MAX_TOKENS,
+                stream=False,
+            )
+            text = (completion.choices[0].message.content or "").strip()
 
-        # Try to extract JSON from the response
-        # Handle cases where model wraps JSON in markdown code blocks
-        if "```" in text:
-            json_start = text.find("{")
-            json_end = text.rfind("}") + 1
-            if json_start >= 0 and json_end > json_start:
-                text = text[json_start:json_end]
+            # Extract JSON from markdown code blocks if present
+            if "```" in text:
+                json_start = text.find("{")
+                json_end = text.rfind("}") + 1
+                if json_start >= 0 and json_end > json_start:
+                    text = text[json_start:json_end]
 
-        action_json = json.loads(text)
-        messages.append({"role": "assistant", "content": json.dumps(action_json)})
+            action_json = json.loads(text)
+            messages.append({"role": "assistant", "content": json.dumps(action_json)})
 
-        return ApiDebugAction(
-            action_type=action_json.get("action_type", "inspect_logs"),
-            target=action_json.get("target", obs.available_targets[0] if obs.available_targets else ""),
-            fix_payload=action_json.get("fix_payload"),
-        )
-    except Exception as exc:
-        print(f"[DEBUG] Model request failed: {exc}", flush=True)
-        # Fallback: inspect logs of first available target
-        fallback_target = obs.available_targets[0] if obs.available_targets else ""
-        return ApiDebugAction(
-            action_type="inspect_logs",
-            target=fallback_target,
-        )
+            return ApiDebugAction(
+                action_type=action_json.get("action_type", "inspect_logs"),
+                target=action_json.get("target", obs.available_targets[0] if obs.available_targets else ""),
+                fix_payload=action_json.get("fix_payload"),
+            )
+        except json.JSONDecodeError as exc:
+            print(f"[DEBUG] JSON parse failed (attempt {attempt+1}/{max_retries}): {exc}", flush=True)
+            last_error = exc
+        except Exception as exc:
+            print(f"[DEBUG] API call failed (attempt {attempt+1}/{max_retries}): {exc}", flush=True)
+            last_error = exc
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+
+    # Final fallback: inspect logs of first available target
+    print(f"[DEBUG] All {max_retries} retries failed. Using fallback action. Last error: {last_error}", flush=True)
+    fallback_target = obs.available_targets[0] if obs.available_targets else ""
+    return ApiDebugAction(
+        action_type="inspect_logs",
+        target=fallback_target,
+    )
 
 
 # ─── Main Execution ─────────────────────────────────────────────────────────────

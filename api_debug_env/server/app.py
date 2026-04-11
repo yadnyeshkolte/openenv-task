@@ -139,18 +139,38 @@ async def run_grader(request: GraderRequest):
 
 
 @app.post("/baseline")
-async def run_baseline(request: BaselineRequest):
+async def run_baseline(request: Optional[BaselineRequest] = None):
     """
-    Run a simple rule-based baseline agent on all tasks.
+    Run a rule-based baseline agent on all tasks.
+    The baseline inspects logs/configs and then submits known fixes.
     Returns baseline scores for each task.
     """
+    # Known fixes for each task (a heuristic baseline, not an LLM)
+    known_fixes = {
+        "easy": [
+            {"target": "payment_client", "fix": {"headers.Authorization": "Bearer sk_live_token123", "headers.Content-Type": "application/json"}},
+        ],
+        "medium": [
+            {"target": "webhook_sender", "fix": {"rate_limit.requests_per_second": 10}},
+            {"target": "webhook_sender", "fix": {"retry": {"max_retries": 3, "backoff_factor": 2, "retry_on_status": [429, 500]}}},
+            {"target": "webhook_sender", "fix": {"headers.X-Webhook-Signature": "sha256=computed_signature"}},
+        ],
+        "hard": [
+            {"target": "order_service", "fix": {"inventory_url": "https://inventory.internal/v2/reserve"}},
+            {"target": "order_service", "fix": {"timeout": 10}},
+            {"target": "order_service", "fix": {"async_mode": True}},
+            {"target": "inventory_service", "fix": {"headers.Authorization": "Bearer valid_token_789"}},
+            {"target": "inventory_service", "fix": {"token_refresh_url": "https://auth.internal/refresh", "auto_refresh": True}},
+        ],
+    }
+
     results = {}
 
     for task_id in get_all_task_ids():
         env = ApiDebugEnvironment(task_id=task_id)
         obs = env.reset()
 
-        # Simple baseline strategy: inspect all logs, then all configs, then submit fixes
+        # Phase 1: Inspect all logs
         for service in obs.available_targets:
             if env._done:
                 break
@@ -159,6 +179,7 @@ async def run_baseline(request: BaselineRequest):
                 target=service,
             ))
 
+        # Phase 2: Inspect all configs
         for service in obs.available_targets:
             if env._done:
                 break
@@ -167,12 +188,14 @@ async def run_baseline(request: BaselineRequest):
                 target=service,
             ))
 
-        for service in obs.available_targets:
+        # Phase 3: Submit fixes
+        for fix_info in known_fixes.get(task_id, []):
             if env._done:
                 break
             obs = env.step(ApiDebugAction(
-                action_type="inspect_endpoint",
-                target=service,
+                action_type="submit_fix",
+                target=fix_info["target"],
+                fix_payload=fix_info["fix"],
             ))
 
         # Store for grading
